@@ -33,8 +33,7 @@ struct NodeBucket
     }
 };
 
-// FIXME This should be replaced by an std::unordered_multimap, though this needs benchmarking
-using SearchSpaceWithBuckets = std::unordered_map<NodeID, std::vector<NodeBucket>>;
+using SearchSpaceWithBuckets = std::unordered_multimap<NodeID, NodeBucket>;
 
 template <bool DIRECTION>
 void relaxOutgoingEdges(const datafacade::ContiguousInternalMemoryDataFacade<Algorithm> &facade,
@@ -85,42 +84,39 @@ void forwardRoutingStep(const datafacade::ContiguousInternalMemoryDataFacade<Alg
     const EdgeWeight source_duration = query_heap.GetData(node).duration;
 
     // check if each encountered node has an entry
-    const auto bucket_iterator = search_space_with_buckets.find(node);
-    // iterate bucket if there exists one
-    if (bucket_iterator != search_space_with_buckets.end())
+    const auto bucket_range = search_space_with_buckets.equal_range(node);
+    for (auto it = bucket_range.first; it != bucket_range.second; ++it)
     {
-        const std::vector<NodeBucket> &bucket_list = bucket_iterator->second;
-        for (const NodeBucket &current_bucket : bucket_list)
+        const NodeBucket &current_bucket = it->second;
+        // get target id from bucket entry
+        const unsigned column_idx = current_bucket.target_id;
+        const EdgeWeight target_weight = current_bucket.weight;
+        const EdgeWeight target_duration = current_bucket.duration;
+
+        auto &current_weight = weights_table[row_idx * number_of_targets + column_idx];
+        auto &current_duration = durations_table[row_idx * number_of_targets + column_idx];
+
+        // check if new weight is better
+        const EdgeWeight new_weight = source_weight + target_weight;
+        if (new_weight < 0)
         {
-            // get target id from bucket entry
-            const unsigned column_idx = current_bucket.target_id;
-            const EdgeWeight target_weight = current_bucket.weight;
-            const EdgeWeight target_duration = current_bucket.duration;
-
-            auto &current_weight = weights_table[row_idx * number_of_targets + column_idx];
-            auto &current_duration = durations_table[row_idx * number_of_targets + column_idx];
-
-            // check if new weight is better
-            const EdgeWeight new_weight = source_weight + target_weight;
-            if (new_weight < 0)
+            const EdgeWeight loop_weight = ch::getLoopWeight<false>(facade, node);
+            const EdgeWeight new_weight_with_loop = new_weight + loop_weight;
+            if (loop_weight != INVALID_EDGE_WEIGHT && new_weight_with_loop >= 0)
             {
-                const EdgeWeight loop_weight = ch::getLoopWeight<false>(facade, node);
-                const EdgeWeight new_weight_with_loop = new_weight + loop_weight;
-                if (loop_weight != INVALID_EDGE_WEIGHT && new_weight_with_loop >= 0)
-                {
-                    current_weight = std::min(current_weight, new_weight_with_loop);
-                    current_duration = std::min(current_duration,
-                                                source_duration + target_duration +
-                                                    ch::getLoopWeight<true>(facade, node));
-                }
-            }
-            else if (new_weight < current_weight)
-            {
-                current_weight = new_weight;
-                current_duration = source_duration + target_duration;
+                current_weight = std::min(current_weight, new_weight_with_loop);
+                current_duration = std::min(current_duration,
+                                            source_duration + target_duration +
+                                                ch::getLoopWeight<true>(facade, node));
             }
         }
+        else if (new_weight < current_weight)
+        {
+            current_weight = new_weight;
+            current_duration = source_duration + target_duration;
+        }
     }
+
     if (ch::stallAtNode<FORWARD_DIRECTION>(facade, node, source_weight, query_heap))
     {
         return;
@@ -139,7 +135,7 @@ void backwardRoutingStep(const datafacade::ContiguousInternalMemoryDataFacade<Al
     const EdgeWeight target_duration = query_heap.GetData(node).duration;
 
     // store settled nodes in search space bucket
-    search_space_with_buckets[node].emplace_back(column_idx, target_weight, target_duration);
+    search_space_with_buckets.emplace(node, NodeBucket{column_idx, target_weight, target_duration});
 
     if (ch::stallAtNode<REVERSE_DIRECTION>(facade, node, target_weight, query_heap))
     {
